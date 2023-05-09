@@ -410,6 +410,8 @@ class QueueIterator(AbstractQueueIterator):
     async def close(self, *_: Any) -> Any:
         log.debug("Cancelling queue iterator %r", self)
 
+        self._closed.set()
+
         if not hasattr(self, "_consumer_tag"):
             log.debug("Queue iterator %r already cancelled", self)
             return
@@ -432,6 +434,7 @@ class QueueIterator(AbstractQueueIterator):
         try:
             while True:
                 msg = self._queue.get_nowait()
+                self._queue.task_done()
         except asyncio.QueueEmpty:
             if msg is None:
                 return
@@ -469,6 +472,7 @@ class QueueIterator(AbstractQueueIterator):
         self._amqp_queue: AbstractQueue = queue
         self._queue = asyncio.Queue()
         self._consume_kwargs = kwargs
+        self._closed = asyncio.Event()
 
         self._amqp_queue.close_callbacks.add(self.close)
 
@@ -499,11 +503,33 @@ class QueueIterator(AbstractQueueIterator):
     async def __anext__(self) -> IncomingMessage:
         if not hasattr(self, "_consumer_tag"):
             await self.consume()
+
+        timeout = self._consume_kwargs.get("timeout")
+
+        message = asyncio.create_task(self._queue.get())
+        closed = asyncio.create_task(self._closed.wait())
+
+        pending = [message, closed]
+
         try:
-            return await asyncio.wait_for(
-                self._queue.get(),
-                timeout=self._consume_kwargs.get("timeout"),
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout
             )
+
+            if message in done:
+                self._queue.task_done()
+                return message.result()
+            if closed in done:
+                raise StopAsyncIteration
+            if not done:
+                log.info(
+                    "%r closing with timeout %d seconds",
+                    self, timeout,
+                )
+                await asyncio.wait_for(self.close(), timeout=timeout)
+                raise TimeoutError
         except asyncio.CancelledError:
             timeout = self._consume_kwargs.get(
                 "timeout",
@@ -515,6 +541,10 @@ class QueueIterator(AbstractQueueIterator):
             )
             await asyncio.wait_for(self.close(), timeout=timeout)
             raise
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 __all__ = ("Queue", "QueueIterator", "ConsumerTag")
