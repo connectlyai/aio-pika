@@ -83,7 +83,7 @@ warn_redundant_casts = true
 warn_unused_configs = true
 warn_unused_ignores = true
 files = [
-    "aio_pika",
+    "src/aio_pika",
     "tests",
     "docs/source/examples",
     "docs/source/rabbitmq-tutorial/examples/1-introduction",
